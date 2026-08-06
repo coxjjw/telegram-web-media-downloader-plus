@@ -1,8 +1,8 @@
 import re, pathlib
 
-SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.2.js")
+SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.3.js")
 
-TARGET_VERSION = "2.2"
+TARGET_VERSION = "2.3"
 OUT_DIR = pathlib.Path(r"E:\AI\WorkBuddy\github\telegram-web-media-downloader-plus")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 

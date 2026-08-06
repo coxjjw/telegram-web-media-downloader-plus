@@ -4,7 +4,7 @@
 // @name:zh-TW   Telegram 網頁版媒體下載器 -Plus
 // @namespace    coxjjw
 // @license      MIT
-// @version      2.2
+// @version      2.3
 // @description       Download photos and videos from Telegram Web, one by one or in batches — even in restricted "no-forwards" chats. Also re-enables copying text, and adds a "ZF" button that re-uploads the selected media into any chat you pick (download → upload, no forward API).
 // @description:zh-CN 从 Telegram 网页版下载图片和视频，可单个或整批保存，即使在禁止转发的受限聊天中也能使用。同时恢复复制受保护消息中的文字，并新增「ZF」批量转发按钮：先把选中媒体下载到内存，再以全新文件上传到你指定的群组／频道／私聊（不走转发 API）。
 // @author       Dharan Tej（原作者） | 二次修改完善：coxjjw
@@ -154,7 +154,17 @@
             '.nk-tt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
             '.nk-tag{font-size:11px;opacity:.55;flex:0 0 auto}',
             '.nk-opts{padding:10px 16px;border-top:1px solid var(--border-color,rgba(255,255,255,.12));display:flex;flex-direction:column;gap:7px;font-size:13px}',
-            '.nk-opts label{display:flex;align-items:center;gap:8px;cursor:pointer}',
+            '.nk-opts label{display:flex;align-items:center;gap:9px;cursor:pointer;padding:9px 11px;border:1px solid var(--border-color,rgba(255,255,255,.18));border-radius:9px;transition:background .15s,border-color .15s}',
+            '.nk-opts label:hover{background:rgba(128,128,128,.12)}',
+            // 隐藏原生 checkbox（避免被 Telegram 全局 CSS 吃成不可见），改用自带样式的勾选卡片。
+            '.nk-opts input[type=checkbox]{position:absolute;opacity:0;width:0;height:0;margin:0}',
+            '.nk-opts .nk-box{position:relative;width:18px;height:18px;flex:0 0 18px;border:2px solid var(--secondary-text-color,#9aa0a6);border-radius:5px;box-sizing:border-box;transition:background .15s,border-color .15s}',
+            '.nk-opts .nk-box::after{content:"";position:absolute;left:5px;top:1px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);opacity:0;transition:opacity .15s}',
+            '.nk-opts input:checked + .nk-box{background:var(--primary-color,#3390ec);border-color:var(--primary-color,#3390ec)}',
+            '.nk-opts input:checked + .nk-box::after{opacity:1}',
+            // 勾选时整行高亮，选中状态一目了然。
+            '.nk-opts label:has(input:checked){background:rgba(51,144,236,.16);border-color:var(--primary-color,#3390ec)}',
+            '.nk-opts .nk-o-tx{flex:1;user-select:none}',
             '.nk-ft{display:flex;justify-content:flex-end;gap:6px;padding:10px 12px 14px}',
             '.nk-btn{padding:7px 16px;border-radius:8px;border:0;cursor:pointer;font-size:14px;background:transparent;color:var(--primary-color,#3390ec);font-weight:600}',
             '.nk-btn.pri{background:var(--primary-color,#3390ec);color:#fff}',
@@ -837,9 +847,9 @@
                 '</div>' +
                 '<div class="nk-list"><div style="padding:18px;opacity:.6">正在读取会话列表…</div></div>' +
                 '<div class="nk-opts">' +
-                '<label><input type="checkbox" class="nk-o-cap"> 携带原消息的文字说明</label>' +
-                '<label><input type="checkbox" class="nk-o-file"> 以「文件」方式发送（不压缩）</label>' +
-                '<label><input type="checkbox" class="nk-o-save"> 同时保存一份到本地</label>' +
+                '<label><input type="checkbox" class="nk-o-cap"><span class="nk-box"></span><span class="nk-o-tx">携带原消息的文字说明</span></label>' +
+                '<label><input type="checkbox" class="nk-o-file"><span class="nk-box"></span><span class="nk-o-tx">以「文件」方式发送（不压缩）</span></label>' +
+                '<label><input type="checkbox" class="nk-o-save"><span class="nk-box"></span><span class="nk-o-tx">同时保存一份到本地</span></label>' +
                 '</div>' +
                 '<div class="nk-ft"><button class="nk-btn nk-cancel">取消</button>' +
                 '<button class="nk-btn pri nk-ok" disabled>开始转发</button></div>' +

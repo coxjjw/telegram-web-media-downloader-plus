@@ -4,7 +4,7 @@
 > 即使在「禁止转发 / 禁止保存」的受限聊天里也能用；并新增 **ZF 批量转发** 功能。
 
 - 原名（英文）：**Telegram Web Media Downloader Plus**
-- 版本：`2.2`
+- 版本：`2.3`
 - 许可证：**MIT**
 - 作者：Dharan Tej（原作者）｜ 二次修改完善：**coxjjw**
 - 原始脚本：<https://greasyfork.org/scripts/585543>
