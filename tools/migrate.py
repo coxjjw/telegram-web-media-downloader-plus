@@ -1,10 +1,17 @@
 import re, pathlib
 
-SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.1.js")
+SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.2.js")
+
+TARGET_VERSION = "2.2"
 OUT_DIR = pathlib.Path(r"E:\AI\WorkBuddy\github\telegram-web-media-downloader-plus")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 text = SRC.read_text(encoding="utf-8")
+
+# 0) 强制把 @version 升到目标版本（源文件有时忘了 bump，不升则用户收不到更新）
+old_ver = re.search(r'// @version\s+([0-9.]+)', text)
+text = re.sub(r'(// @version\s+)[0-9.]+', r'\g<1>' + TARGET_VERSION, text, count=1)
+print(f"version bump: {old_ver.group(1) if old_ver else '?'} -> {TARGET_VERSION}")
 
 # 1) namespace -> coxjjw（明确归属本 fork）
 text = re.sub(r'(// @namespace\s+)\S+', r'\1coxjjw', text, count=1)

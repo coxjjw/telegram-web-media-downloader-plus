@@ -4,7 +4,7 @@
 // @name:zh-TW   Telegram 網頁版媒體下載器 -Plus
 // @namespace    coxjjw
 // @license      MIT
-// @version      2.1
+// @version      2.2
 // @description       Download photos and videos from Telegram Web, one by one or in batches — even in restricted "no-forwards" chats. Also re-enables copying text, and adds a "ZF" button that re-uploads the selected media into any chat you pick (download → upload, no forward API).
 // @description:zh-CN 从 Telegram 网页版下载图片和视频，可单个或整批保存，即使在禁止转发的受限聊天中也能使用。同时恢复复制受保护消息中的文字，并新增「ZF」批量转发按钮：先把选中媒体下载到内存，再以全新文件上传到你指定的群组／频道／私聊（不走转发 API）。
 // @author       Dharan Tej（原作者） | 二次修改完善：coxjjw
@@ -96,6 +96,29 @@
         const s = (m.sizes || []).filter((x) => x.w && x.h);
         return s[s.length - 1] || null;
     };
+
+    // 字节数转人类可读字符串（B/KB/MB/GB）。
+    const b2s = (n) => {
+        n = Number(n) || 0;
+        const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i ? n.toFixed(n < 10 ? 2 : 1) : n) + ' ' + u[i];
+    };
+
+    // 估算当前标签页「可用内存」字节数。优先用 Chrome 的 performance.memory 实测，
+    // 否则退回 navigator.deviceMemory（设备总内存的一半，偏保守）。real=false 表示只是估算。
+    function availMem() {
+        try {
+            const pm = performance && performance.memory;
+            if (pm && pm.jsHeapSizeLimit) {
+                const free = pm.jsHeapSizeLimit - (pm.usedJSHeapSize || 0);
+                return { bytes: Math.max(0, free), real: true };
+            }
+        } catch {}
+        const dev = (navigator && navigator.deviceMemory ? navigator.deviceMemory : 4) * 1024 * 1024 * 1024;
+        return { bytes: dev * 0.5, real: false };
+    }
 
     // 按钮文案统一走 DOM 查询，避免持有可能被 Telegram 重建的元素引用。
     const setDlTxt = (t) => { const el = document.querySelector('#nk-tg-batch .nk-txt'); if (el) el.textContent = t; };
@@ -934,6 +957,7 @@
             '<b>→ ' + esc(title) + '</b><span class="nk-x">✕</span></div>' +
             '<div class="nk-st" style="margin-top:4px;opacity:.85">准备中…</div>' +
             '<div class="nk-bar"><i></i></div>' +
+            '<div class="nk-file" style="margin-top:4px;font-size:12px;opacity:.7"></div>' +
             '<div class="nk-log"></div>';
         document.body.appendChild(el);
 
@@ -944,6 +968,8 @@
             current: null,        // 当前下载句柄，用于中断
             status(t) { el.querySelector('.nk-st').textContent = t; },
             progress(p) { el.querySelector('.nk-bar > i').style.width = Math.max(0, Math.min(1, p)) * 100 + '%'; },
+            // 单条媒体的实时下载进度（字节级），与上方整组进度条并存，便于用户看清每项进度。
+            file(t) { const f = el.querySelector('.nk-file'); if (f) f.textContent = t; },
             log(t) {
                 const log = el.querySelector('.nk-log');
                 log.insertAdjacentHTML('beforeend', '<div>' + esc(t) + '</div>');
@@ -971,13 +997,33 @@
         const choice = await pickTarget(all.length);
         if (!choice) return;
 
+        // 选中媒体的总体积，转发前用于「总大小 vs 可用内存」的安全比对。
+        const totalBytes = all.reduce((s, m) => s + sizeOf(mediaOf(m)), 0);
+        const mem = availMem();
+
+        const hud = createHud(choice.title);
+        hud.log('待转发 ' + all.length + ' 项，共 ' + b2s(totalBytes) +
+            '；可用内存约 ' + b2s(mem.bytes) + (mem.real ? '' : '（估算）'));
+
+        // 内存安全比对：仅当可实测可用内存、且总大小超过 85% 余量时直接中止，
+        // 避免标签页因一次性把全部大文件堆进内存而崩溃。
+        if (mem.real && totalBytes > mem.bytes * 0.85) {
+            hud.status('⚠ 待转发总大小 ' + b2s(totalBytes) + ' 超过可用内存 ' + b2s(mem.bytes) + '，已停止');
+            hud.log('✗ 内存可能不足，请减少本次转发数量、或分多批转发后再试');
+            hud.done = true;
+            hud.progress(1);
+            setTimeout(() => { if (hud.done) hud.close(); }, 20000);
+            setBusy('nk-tg-fwd', false);
+            setZfTxt('ZF');
+            return;
+        }
+
         // 「同时存一份到本地」也不能变成逐个弹保存框，在目标选完后统一定一次目录。
         if (choice.opts.saveLocal) { await ensureDir(all.length); syncDlLabel(); }
 
         setBusy('nk-tg-fwd', true);
         sel?.cancelSelection();
 
-        const hud = createHud(choice.title);
         let ok = 0, fail = 0;
 
         // 按 grouped_id 分组：同一相册的多条媒体合并成一条相册发送；无 grouped_id 的各自成组。
@@ -1006,9 +1052,20 @@
                     hud.status(tag + '下载 ' + meta.name);
                     const p = startDownload(media);
                     hud.current = p;
-                    try { p.addNotifyListener?.((d) => d?.total && hud.progress((done + d.done / d.total) / all.length)); } catch {}
+                    // 整组进度条按「已完成条数 + 当前条下载比例」推进；
+                    // 单条媒体的实时字节进度单独显示在下方 .nk-file 行，方便看清每项进度。
+                    try {
+                        p.addNotifyListener?.((d) => {
+                            if (d?.total) {
+                                hud.progress((done + d.done / d.total) / all.length);
+                                const pct = Math.min(99, Math.round((d.done / d.total) * 100));
+                                hud.file(tag + '下载 ' + meta.name + '：' + b2s(d.done) + ' / ' + b2s(d.total) + ' (' + pct + '%)');
+                            }
+                        });
+                    } catch {}
                     const blob = await toBlob(p);
                     hud.current = null;
+                    hud.file('');   // 本条下载完成，清空单条进度行
 
                     if (hud.cancelled) break;
                     if (choice.opts.saveLocal) saveLocally(blob, meta.name).catch(() => {});
@@ -1024,6 +1081,7 @@
                 if (hud.cancelled) break;
                 if (!items.length) continue;
 
+                hud.file('');
                 hud.status('(' + (gi + 1) + '/' + groupList.length + ') 上传 ' + items.length + ' 项');
                 await sendAlbum(choice.peerId, items, choice.opts, groupCaption);
                 ok += g.length;
