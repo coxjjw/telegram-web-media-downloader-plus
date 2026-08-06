@@ -1,6 +1,6 @@
 import re, pathlib
 
-SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.0.js")
+SRC = pathlib.Path(r"E:\AI\WorkBuddy\编程\monkey\Telegram Web Media Downloader Plus 2.1.js")
 OUT_DIR = pathlib.Path(r"E:\AI\WorkBuddy\github\telegram-web-media-downloader-plus")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -10,7 +10,7 @@ text = SRC.read_text(encoding="utf-8")
 text = re.sub(r'(// @namespace\s+)\S+', r'\1coxjjw', text, count=1)
 
 # 2) 在 @icon 行后插入 @downloadURL / @updateURL，指向本仓库 raw 文件
-RAW = "https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/main/telegram-web-media-downloader-plus.user.js"
+RAW = "https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/master/telegram-web-media-downloader-plus.user.js"
 def insert_urls(m):
     return m.group(0) + f"\n// @downloadURL  {RAW}\n// @updateURL    {RAW}"
 text = re.sub(r'// @icon\s+\S+', insert_urls, text, count=1)

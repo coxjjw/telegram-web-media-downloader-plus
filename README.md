@@ -4,7 +4,7 @@
 > 即使在「禁止转发 / 禁止保存」的受限聊天里也能用；并新增 **ZF 批量转发** 功能。
 
 - 原名（英文）：**Telegram Web Media Downloader Plus**
-- 版本：`2.0`
+- 版本：`2.1`
 - 许可证：**MIT**
 - 作者：Dharan Tej（原作者）｜ 二次修改完善：**coxjjw**
 - 原始脚本：<https://greasyfork.org/scripts/585543>
@@ -36,7 +36,7 @@
 
 ### 方式二：直接从 GitHub 安装（开发者 / 想抢先体验）
 点击仓库里的
-[`telegram-web-media-downloader-plus.user.js`](https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/main/telegram-web-media-downloader-plus.user.js)
+[`telegram-web-media-downloader-plus.user.js`](https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/master/telegram-web-media-downloader-plus.user.js)
 ，Tampermonkey 会识别 `.user.js` 并弹出安装框。
 脚本头里已写好 `@downloadURL` / `@updateURL` 指向本仓库 raw 文件，因此也能自动更新。
 
@@ -75,10 +75,10 @@
 
 ```
 同步方式：自动
-同步 URL：https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/main/telegram-web-media-downloader-plus.user.js
+同步 URL：https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/master/telegram-web-media-downloader-plus.user.js
 ```
 
-点击「更新设置并立即同步」。此后每次向 GitHub `main` 分支推送，GreasyFork 会在数小时内拉取新版本。
+点击「更新设置并立即同步」。此后每次向 GitHub `master` 分支推送，GreasyFork 会在数小时内拉取新版本。
 
 ### 第 4 步（可选）：配置 Webhook 实现「推送即更新」
 GreasyFork 默认的定时同步有延迟。想要**推送后立刻更新**，配置 GitHub Webhook：

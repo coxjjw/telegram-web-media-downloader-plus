@@ -4,7 +4,7 @@
 // @name:zh-TW   Telegram 網頁版媒體下載器 -Plus
 // @namespace    coxjjw
 // @license      MIT
-// @version      2.0
+// @version      2.1
 // @description       Download photos and videos from Telegram Web, one by one or in batches — even in restricted "no-forwards" chats. Also re-enables copying text, and adds a "ZF" button that re-uploads the selected media into any chat you pick (download → upload, no forward API).
 // @description:zh-CN 从 Telegram 网页版下载图片和视频，可单个或整批保存，即使在禁止转发的受限聊天中也能使用。同时恢复复制受保护消息中的文字，并新增「ZF」批量转发按钮：先把选中媒体下载到内存，再以全新文件上传到你指定的群组／频道／私聊（不走转发 API）。
 // @author       Dharan Tej（原作者） | 二次修改完善：coxjjw
@@ -16,8 +16,8 @@
 // @match        https://webk.telegram.org/*
 // @match        https://webz.telegram.org/*
 // @icon         https://web.telegram.org/k/assets/img/favicon.ico
-// @downloadURL  https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/main/telegram-web-media-downloader-plus.user.js
-// @updateURL    https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/main/telegram-web-media-downloader-plus.user.js
+// @downloadURL  https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/master/telegram-web-media-downloader-plus.user.js
+// @updateURL    https://raw.githubusercontent.com/coxjjw/telegram-web-media-downloader-plus/master/telegram-web-media-downloader-plus.user.js
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -681,6 +681,41 @@
         }
     }
 
+    // 调用 WebK 真身的 sendGrouped，把一组媒体合并成一条相册发出。
+    // isMedia 控制按图片/视频发送（true）还是文档文件（false）；sendGrouped 内部给每项
+    // 打相同 groupId 后走 messages.sendMultiMedia，目标会话显示为一条相册。
+    // sendGrouped 不存在（老版本）时回退为逐条 sendFile（旧行为）。
+    async function sendAlbum(peerId, items, opts, caption) {
+        const am = mgrs()?.appMessagesManager;
+        if (!am) throw new Error('appMessagesManager 不存在');
+
+        const details = items.map((it) => {
+            const d = { file: it.file };
+            if (it.meta.w) d.width = it.meta.w;
+            if (it.meta.h) d.height = it.meta.h;
+            if (it.meta.duration != null) d.duration = it.meta.duration;
+            if (it.thumb) d.thumb = it.thumb;
+            try { d.objectURL = URL.createObjectURL(it.file); } catch {}
+            return d;
+        });
+
+        const asMedia = !opts.asFile;
+        const args = { peerId: Number(peerId), sendFileDetails: details, isMedia: asMedia };
+        if (caption) args.caption = caption;
+
+        if (typeof am.sendGrouped === 'function') {
+            try { return await am.sendGrouped(args); }
+            catch {
+                try { return await am.sendGrouped(Number(peerId), details, { isMedia: asMedia, caption }); }
+                catch {}
+            }
+        }
+        // 回退：逐条发送
+        for (let i = 0; i < items.length; i++) {
+            await sendTo(peerId, items[i].file, items[i].meta, opts, i === 0 ? caption : '', items[i].thumb);
+        }
+    }
+
     // 把 peerId 归一成会话选择列表需要的展示信息；已退出/被踢的会话返回 null 过滤掉。
     async function peerInfo(peerId) {
         peerId = Number(peerId);
@@ -925,19 +960,19 @@
         return api;
     }
 
-    // 逐条「下载到内存 → 重新上传」。全程串行，避免多个大文件同时占内存。
+    // 按 grouped_id 分组「下载到内存 → 重新上传」，同组用 sendGrouped 合并成一条相册。
     async function forwardSelected() {
         const sel = page.appImManager?.chat?.selection;
-        const msgs = ((await sel?.getSelectedMessages()) || []).filter(mediaOf)
+        const all = ((await sel?.getSelectedMessages()) || []).filter(mediaOf)
             .sort((a, b) => (a.mid || 0) - (b.mid || 0));
 
-        if (!msgs.length) { setZfTxt('N/A'); await delay(1500); setZfTxt('ZF'); return; }
+        if (!all.length) { setZfTxt('N/A'); await delay(1500); setZfTxt('ZF'); return; }
 
-        const choice = await pickTarget(msgs.length);
+        const choice = await pickTarget(all.length);
         if (!choice) return;
 
         // 「同时存一份到本地」也不能变成逐个弹保存框，在目标选完后统一定一次目录。
-        if (choice.opts.saveLocal) { await ensureDir(msgs.length); syncDlLabel(); }
+        if (choice.opts.saveLocal) { await ensureDir(all.length); syncDlLabel(); }
 
         setBusy('nk-tg-fwd', true);
         sel?.cancelSelection();
@@ -945,50 +980,68 @@
         const hud = createHud(choice.title);
         let ok = 0, fail = 0;
 
-        for (let i = 0; i < msgs.length; i++) {
-            if (hud.cancelled) break;
-            const media = mediaOf(msgs[i]);
-            const meta = metaOf(media);
-            const tag = '(' + (i + 1) + '/' + msgs.length + ') ';
-            setZfTxt((i + 1) + '/' + msgs.length);
+        // 按 grouped_id 分组：同一相册的多条媒体合并成一条相册发送；无 grouped_id 的各自成组。
+        const groups = new Map();
+        for (const m of all) {
+            const key = m.grouped_id != null ? m.grouped_id : '__single_' + (m.mid || (ok + fail));
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(m);
+        }
+        const groupList = [...groups.values()];
 
-            let blob;
-            try {
-                hud.status(tag + '下载 ' + meta.name);
-                const p = startDownload(media);
-                hud.current = p;
-                try { p.addNotifyListener?.((d) => d?.total && hud.progress((i + d.done / d.total) / msgs.length)); } catch {}
-                blob = await toBlob(p);
-                hud.current = null;
-            } catch (err) {
-                fail++; hud.log('✗ ' + meta.name + ' 下载失败: ' + (err?.message || err));
-                console.warn('[tg-zf] 下载失败', err);
-                continue;
-            }
-
+        let done = 0;
+        for (let gi = 0; gi < groupList.length; gi++) {
             if (hud.cancelled) break;
-            if (choice.opts.saveLocal) saveLocally(blob, meta.name).catch(() => {});
+            const g = groupList[gi];
+            const items = [];
+            let groupCaption = '';
 
             try {
-                hud.status(tag + '上传 ' + meta.name);
-                const file = new File([blob], meta.name, { type: meta.mime });
-                let thumb = null;
-                if (!choice.opts.asFile && meta.isVideo) thumb = await videoThumb(blob);
-                const caption = choice.opts.keepCaption ? (msgs[i].message || '') : '';
-                await sendTo(choice.peerId, file, meta, choice.opts, caption, thumb);
-                ok++; hud.log('✓ ' + meta.name);
+                for (let i = 0; i < g.length; i++) {
+                    const media = mediaOf(g[i]);
+                    const meta = metaOf(media);
+                    const tag = '(' + (gi + 1) + '/' + groupList.length + ')[' + (i + 1) + '/' + g.length + '] ';
+                    setZfTxt((gi + 1) + '/' + groupList.length);
+
+                    hud.status(tag + '下载 ' + meta.name);
+                    const p = startDownload(media);
+                    hud.current = p;
+                    try { p.addNotifyListener?.((d) => d?.total && hud.progress((done + d.done / d.total) / all.length)); } catch {}
+                    const blob = await toBlob(p);
+                    hud.current = null;
+
+                    if (hud.cancelled) break;
+                    if (choice.opts.saveLocal) saveLocally(blob, meta.name).catch(() => {});
+
+                    const file = new File([blob], meta.name, { type: meta.mime });
+                    let thumb = null;
+                    if (!choice.opts.asFile && meta.isVideo) thumb = await videoThumb(blob);
+                    // 相册只能带一条说明，放在首条；无分组的单条则各自带自己的说明。
+                    if (choice.opts.keepCaption && i === 0) groupCaption = g[0].message || '';
+                    items.push({ file, meta, thumb });
+                }
+
+                if (hud.cancelled) break;
+                if (!items.length) continue;
+
+                hud.status('(' + (gi + 1) + '/' + groupList.length + ') 上传 ' + items.length + ' 项');
+                await sendAlbum(choice.peerId, items, choice.opts, groupCaption);
+                ok += g.length;
+                hud.log('✓ 组 ' + (gi + 1) + ' (' + items.length + ' 项)');
             } catch (err) {
-                fail++; hud.log('✗ ' + meta.name + ' 上传失败: ' + (err?.message || err));
-                console.warn('[tg-zf] 上传失败', err);
+                fail += g.length;
+                hud.log('✗ 组 ' + (gi + 1) + ' 失败: ' + (err?.message || err));
+                console.warn('[tg-zf] 发送失败', err);
             }
 
-            hud.progress((i + 1) / msgs.length);
-            if (i < msgs.length - 1) await delay(SEND_GAP_MS);
+            done += g.length;
+            hud.progress(done / all.length);
+            if (gi < groupList.length - 1) await delay(SEND_GAP_MS);
         }
 
         hud.done = true;
         hud.progress(1);
-        // sendFile 返回时只代表入队成功，实际上传仍在 Telegram 后台进行。
+        // sendGrouped/sendFile 返回时只代表入队成功，实际上传仍在 Telegram 后台进行。
         hud.status((hud.cancelled ? '已停止' : '完成') + '：成功 ' + ok + '，失败 ' + fail +
             (ok ? '（上传在 Telegram 后台继续）' : ''));
         hud.el.insertAdjacentHTML('beforeend',
