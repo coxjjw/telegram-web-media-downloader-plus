@@ -4,7 +4,7 @@
 // @name:zh-TW   Telegram 網頁版媒體下載器 -Plus
 // @namespace    coxjjw
 // @license      MIT
-// @version      2.3
+// @version      2.5
 // @description       Download photos and videos from Telegram Web, one by one or in batches — even in restricted "no-forwards" chats. Also re-enables copying text, and adds a "ZF" button that re-uploads the selected media into any chat you pick (download → upload, no forward API).
 // @description:zh-CN 从 Telegram 网页版下载图片和视频，可单个或整批保存，即使在禁止转发的受限聊天中也能使用。同时恢复复制受保护消息中的文字，并新增「ZF」批量转发按钮：先把选中媒体下载到内存，再以全新文件上传到你指定的群组／频道／私聊（不走转发 API）。
 // @author       Dharan Tej（原作者） | 二次修改完善：coxjjw
@@ -118,6 +118,21 @@
         } catch {}
         const dev = (navigator && navigator.deviceMemory ? navigator.deviceMemory : 4) * 1024 * 1024 * 1024;
         return { bytes: dev * 0.5, real: false };
+    }
+
+    // Telegram 服务端单文件上传上限：非 Premium 2GB / Premium 4GB（服务端强制，与内存无关）。
+    // 探测链（已核对 tweb appUsersManager.ts）：isPremium(selfId) → getSelf().pFlags.premium；
+    // 探测失败时保守按 2GB，宁可多拦不误放。
+    function uploadLimit() {
+        try {
+            const um = mgrs()?.appUsersManager;
+            if (um) {
+                const self = um.getSelf?.() || null;
+                if (self?.id != null && typeof um.isPremium === 'function' && um.isPremium(self.id)) return 4 * 1024 * 1024 * 1024;
+                if (self?.pFlags?.premium) return 4 * 1024 * 1024 * 1024;
+            }
+        } catch {}
+        return 2 * 1024 * 1024 * 1024;
     }
 
     // 按钮文案统一走 DOM 查询，避免持有可能被 Telegram 重建的元素引用。
@@ -378,6 +393,7 @@
         const fh = await h.getFileHandle(await freeName(h, name), { create: true });
         const w = await fh.createWritable();
         try { await w.write(blob); } finally { await w.close(); }
+        return fh.name;   // 返回实际写入的文件名（可能带去重后缀），供磁盘中转后删除/复用
     }
 
     function openDlSettings() {
@@ -996,6 +1012,49 @@
         return api;
     }
 
+    // 内存风险确认弹窗：返回 'relay'=经磁盘中转（推荐），'direct'=直接内存转发，false=取消。
+    // 说明：一旦真的内存耗尽，页面会整体假死、任何脚本提示都无法弹出，
+    // 所以必须在开始下载前就把风险讲清楚并让用户选择路径。
+    function memConfirm(totalBytes, maxSingle, mem, risk) {
+        return new Promise((resolve) => {
+            ensureStyles();
+            const mask = document.createElement('div');
+            mask.className = 'nk-mask';
+            mask.innerHTML =
+                '<div class="nk-modal">' +
+                '<div class="nk-hd">' + (risk === 'high' ? '⚠ 内存不足风险较高' : '⚠ 内存风险提示') + '</div>' +
+                '<div style="padding:4px 16px 0;font-size:13px;line-height:1.75">' +
+                '本次待转发 <b>' + b2s(totalBytes) + '</b>' +
+                (maxSingle < totalBytes ? '，其中最大单件 <b>' + b2s(maxSingle) + '</b>' : '') +
+                '；当前可用内存约 <b>' + b2s(mem.bytes) + '</b>' + (mem.real ? '' : '（估算）') + '。' +
+                '<br>直接转发需要把媒体完整下载进内存再上传，体量过大' +
+                '<strong>可能导致页面卡死或崩溃</strong>——一旦卡死将无法弹出任何提示，只能刷新页面重试。' +
+                '<br><br><b>建议：</b>' +
+                (FSA ? '<br>· <strong>经磁盘中转</strong>：先下载到本地文件夹、再从磁盘分片上传，内存占用最低（推荐）' : '') +
+                '<br>· 减少单次选择数量，<strong>分多批转发</strong>' +
+                '<br>· 关闭其他标签页 / 程序释放内存后重试' +
+                '<br>· 只想保存到本地的话，改用 D/L 按钮（流式写盘，不占内存）' +
+                '</div>' +
+                '<div class="nk-ft"><button class="nk-btn nk-mc-no">取消</button>' +
+                (FSA ? '<button class="nk-btn nk-mc-relay">经磁盘中转（推荐）</button>' : '') +
+                '<button class="nk-btn pri nk-mc-yes">仍直接转发（风险自负）</button></div>' +
+                '</div>';
+            document.body.appendChild(mask);
+            // Esc / 点遮罩均视为取消，与「取消」按钮一致。
+            const onKey = (e) => { if (e.key === 'Escape') done(false); };
+            function done(v) {
+                document.removeEventListener('keydown', onKey, true);
+                mask.remove();
+                resolve(v);
+            }
+            mask.querySelector('.nk-mc-no').addEventListener('click', () => done(false));
+            mask.querySelector('.nk-mc-relay')?.addEventListener('click', () => done('relay'));
+            mask.querySelector('.nk-mc-yes').addEventListener('click', () => done('direct'));
+            mask.addEventListener('click', (e) => { if (e.target === mask) done(false); });
+            document.addEventListener('keydown', onKey, true);
+        });
+    }
+
     // 按 grouped_id 分组「下载到内存 → 重新上传」，同组用 sendGrouped 合并成一条相册。
     async function forwardSelected() {
         const sel = page.appImManager?.chat?.selection;
@@ -1007,38 +1066,78 @@
         const choice = await pickTarget(all.length);
         if (!choice) return;
 
-        // 选中媒体的总体积，转发前用于「总大小 vs 可用内存」的安全比对。
-        const totalBytes = all.reduce((s, m) => s + sizeOf(mediaOf(m)), 0);
+        const hud = createHud(choice.title);
+
+        // 层1 硬预检：Telegram 单文件上传上限（非 Premium 2GB / Premium 4GB），超限件直接剔除。
+        // 必须在下载前拦截——否则会白下载几个 GB 进内存、上传时才被服务器拒收。
+        const LIMIT = uploadLimit();
+        const sizeOfMsg = (m) => sizeOf(mediaOf(m));
+        const overLimit = all.filter((m) => sizeOfMsg(m) > LIMIT);
+        const list = overLimit.length ? all.filter((m) => sizeOfMsg(m) <= LIMIT) : all;
+        if (overLimit.length) {
+            for (const m of overLimit) {
+                hud.log('✗ 已跳过 ' + metaOf(mediaOf(m)).name + '（' + b2s(sizeOfMsg(m)) +
+                    '）：超过 Telegram 单文件上传上限 ' + b2s(LIMIT) + '，请改用 D/L 保存');
+            }
+            if (!list.length) {
+                hud.done = true;
+                hud.progress(1);
+                hud.status('全部超过 Telegram 上传上限（' + b2s(LIMIT) + '），无法转发');
+                setTimeout(() => { if (hud.done) hud.close(); }, 15000);
+                setBusy('nk-tg-fwd', false);
+                setZfTxt('ZF');
+                return;
+            }
+            hud.log('其余 ' + list.length + ' 项继续');
+        }
+
+        // 选中媒体的总体积与最大单件（只统计可转发项），用于「总大小 vs 可用内存」的风险分级。
+        const sizes = list.map(sizeOfMsg);
+        const totalBytes = sizes.reduce((s, v) => s + v, 0);
+        const maxSingle = sizes.length ? Math.max.apply(null, sizes) : 0;
         const mem = availMem();
 
-        const hud = createHud(choice.title);
-        hud.log('待转发 ' + all.length + ' 项，共 ' + b2s(totalBytes) +
+        hud.log('待转发 ' + list.length + ' 项，共 ' + b2s(totalBytes) +
             '；可用内存约 ' + b2s(mem.bytes) + (mem.real ? '' : '（估算）'));
 
-        // 内存安全比对：仅当可实测可用内存、且总大小超过 85% 余量时直接中止，
-        // 避免标签页因一次性把全部大文件堆进内存而崩溃。
-        if (mem.real && totalBytes > mem.bytes * 0.85) {
-            hud.status('⚠ 待转发总大小 ' + b2s(totalBytes) + ' 超过可用内存 ' + b2s(mem.bytes) + '，已停止');
-            hud.log('✗ 内存可能不足，请减少本次转发数量、或分多批转发后再试');
-            hud.done = true;
-            hud.progress(1);
-            setTimeout(() => { if (hud.done) hud.close(); }, 20000);
-            setBusy('nk-tg-fwd', false);
-            setZfTxt('ZF');
-            return;
+        // 内存风险分级：可用内存只是堆上限的余量，接近它就会 GC 振荡假死。
+        // 超过可用内存 50%（或单件超 40%）→ 提醒；超过 85%（或单件超 60%）→ 高风险。
+        // 弹窗把「中转 / 直接 / 取消」交给用户——一旦真耗尽内存，
+        // 页面假死时连提示都弹不出来，必须事前讲清风险。
+        let risk = 'ok';
+        if (mem.bytes > 0 && (totalBytes > mem.bytes * 0.5 || maxSingle > mem.bytes * 0.4)) risk = 'warn';
+        if (mem.bytes > 0 && (totalBytes > mem.bytes * 0.85 || maxSingle > mem.bytes * 0.6)) risk = 'high';
+        let relayAll = false;
+        if (risk !== 'ok') {
+            hud.log('⚠ 内存风险(' + risk + ')：待转发 ' + b2s(totalBytes) + ' / 可用 ' + b2s(mem.bytes) +
+                (mem.real ? '' : '（估算）') + (maxSingle < totalBytes ? '，最大单件 ' + b2s(maxSingle) : ''));
+            const go = await memConfirm(totalBytes, maxSingle, mem, risk);
+            if (!go) {
+                hud.done = true;
+                hud.progress(1);
+                hud.status('已取消：内存风险，建议分批转发');
+                hud.log('✗ 已取消转发（内存风险）');
+                setTimeout(() => { if (hud.done) hud.close(); }, 8000);
+                setBusy('nk-tg-fwd', false);
+                setZfTxt('ZF');
+                return;
+            }
+            if (go === 'relay') { relayAll = true; hud.log('已选择经磁盘中转转发'); }
+            else hud.log('已选择直接转发（风险自负）');
         }
 
         // 「同时存一份到本地」也不能变成逐个弹保存框，在目标选完后统一定一次目录。
-        if (choice.opts.saveLocal) { await ensureDir(all.length); syncDlLabel(); }
+        if (choice.opts.saveLocal) { await ensureDir(list.length); syncDlLabel(); }
 
         setBusy('nk-tg-fwd', true);
         sel?.cancelSelection();
 
         let ok = 0, fail = 0;
+        let relayDir = null;   // 磁盘中转目录：惰性获取，复用固定保存文件夹机制
 
         // 按 grouped_id 分组：同一相册的多条媒体合并成一条相册发送；无 grouped_id 的各自成组。
         const groups = new Map();
-        for (const m of all) {
+        for (const m of list) {
             const key = m.grouped_id != null ? m.grouped_id : '__single_' + (m.mid || (ok + fail));
             if (!groups.has(key)) groups.set(key, []);
             groups.get(key).push(m);
@@ -1050,7 +1149,27 @@
             if (hud.cancelled) break;
             const g = groupList[gi];
             const items = [];
+            const relayNames = [];   // 本组经磁盘中转写出的临时文件名（发送后按需删除）
             let groupCaption = '';
+            let wd = null;   // 下载停滞看门狗句柄
+
+            // 层2 磁盘中转触发：用户在风险弹窗选了中转，或单件超 MEM_LIMIT(1.5G)，
+            // 或整组体积超过可用内存一半。中转 = 先落盘拿到磁盘背书的 File 再上传，
+            // 页内内存峰值从"整组同时持有"降为"单件瞬时"（大 Blob 还会被 Chrome 分页到磁盘）。
+            const gSizes = g.map((m) => sizeOf(mediaOf(m)));
+            const gMax = Math.max.apply(null, gSizes);
+            const gBytes = gSizes.reduce((s, v) => s + v, 0);
+            const wantRelay = relayAll || gMax > MEM_LIMIT || (mem.bytes > 0 && gBytes > mem.bytes * 0.5);
+            let relay = false;
+            if (wantRelay) {
+                if (FSA) {
+                    relayDir = relayDir || await folderReady(false) || await ensureDir(g.length);
+                    relay = !!relayDir;
+                    if (!relay) hud.log('⚠ 未固定中转文件夹，组 ' + (gi + 1) + ' 改走内存直传');
+                } else {
+                    hud.log('⚠ 当前浏览器不支持文件夹访问，组 ' + (gi + 1) + ' 改走内存直传');
+                }
+            }
 
             try {
                 for (let i = 0; i < g.length; i++) {
@@ -1059,30 +1178,52 @@
                     const tag = '(' + (gi + 1) + '/' + groupList.length + ')[' + (i + 1) + '/' + g.length + '] ';
                     setZfTxt((gi + 1) + '/' + groupList.length);
 
-                    hud.status(tag + '下载 ' + meta.name);
+                    hud.status(tag + (relay ? '下载(中转) ' : '下载 ') + meta.name);
                     const p = startDownload(media);
                     hud.current = p;
+                    // 停滞看门狗：90 秒没有任何下载进度就在浮窗告警（每 90 秒最多一次），
+                    // 避免 toBlob 挂起时"卡住无反应"。仅覆盖下载阶段，完成即清除。
+                    let lastTick = Date.now();
+                    wd = setInterval(() => {
+                        if (hud.done || hud.cancelled) { clearInterval(wd); wd = null; return; }
+                        const idle = (Date.now() - lastTick) / 1000;
+                        if (idle >= 90) {
+                            hud.log('⚠ 「' + meta.name + '」已 ' + Math.round(idle) + ' 秒无进度，疑似停滞；可点右上角 ✕ 停止后重试');
+                            lastTick = Date.now();
+                        }
+                    }, 30000);
                     // 整组进度条按「已完成条数 + 当前条下载比例」推进；
                     // 单条媒体的实时字节进度单独显示在下方 .nk-file 行，方便看清每项进度。
                     try {
                         p.addNotifyListener?.((d) => {
                             if (d?.total) {
-                                hud.progress((done + d.done / d.total) / all.length);
+                                lastTick = Date.now();
+                                hud.progress((done + d.done / d.total) / list.length);
                                 const pct = Math.min(99, Math.round((d.done / d.total) * 100));
                                 hud.file(tag + '下载 ' + meta.name + '：' + b2s(d.done) + ' / ' + b2s(d.total) + ' (' + pct + '%)');
                             }
                         });
                     } catch {}
                     const blob = await toBlob(p);
+                    if (wd) { clearInterval(wd); wd = null; }
                     hud.current = null;
                     hud.file('');   // 本条下载完成，清空单条进度行
 
                     if (hud.cancelled) break;
-                    if (choice.opts.saveLocal) saveLocally(blob, meta.name).catch(() => {});
 
-                    const file = new File([blob], meta.name, { type: meta.mime });
+                    let file;
+                    if (relay) {
+                        // 中转：写进固定文件夹拿磁盘背书的 File，blob 引用随即丢弃（等 GC）。
+                        // 勾了"保存到本地"时该文件正好就是本地副本，后面无需再存一份。
+                        const fname = await writeToFolder(relayDir, blob, meta.name);
+                        file = await (await relayDir.getFileHandle(fname)).getFile();
+                        relayNames.push(fname);
+                    } else {
+                        if (choice.opts.saveLocal) saveLocally(blob, meta.name).catch(() => {});
+                        file = new File([blob], meta.name, { type: meta.mime });
+                    }
                     let thumb = null;
-                    if (!choice.opts.asFile && meta.isVideo) thumb = await videoThumb(blob);
+                    if (!choice.opts.asFile && meta.isVideo) thumb = await videoThumb(file);
                     // 相册只能带一条说明，放在首条；无分组的单条则各自带自己的说明。
                     if (choice.opts.keepCaption && i === 0) groupCaption = g[0].message || '';
                     items.push({ file, meta, thumb });
@@ -1095,15 +1236,20 @@
                 hud.status('(' + (gi + 1) + '/' + groupList.length + ') 上传 ' + items.length + ' 项');
                 await sendAlbum(choice.peerId, items, choice.opts, groupCaption);
                 ok += g.length;
-                hud.log('✓ 组 ' + (gi + 1) + ' (' + items.length + ' 项)');
+                hud.log('✓ 组 ' + (gi + 1) + ' (' + items.length + ' 项' + (relay ? '，经磁盘中转' : '') + ')');
+                // 中转临时文件：没勾"保存到本地"就删掉；勾了则保留（正好就是本地副本）。
+                if (relay && !choice.opts.saveLocal) {
+                    for (const n of relayNames) { try { await relayDir.removeEntry(n); } catch {} }
+                }
             } catch (err) {
+                if (wd) { clearInterval(wd); wd = null; }
                 fail += g.length;
                 hud.log('✗ 组 ' + (gi + 1) + ' 失败: ' + (err?.message || err));
                 console.warn('[tg-zf] 发送失败', err);
             }
 
             done += g.length;
-            hud.progress(done / all.length);
+            hud.progress(done / list.length);
             if (gi < groupList.length - 1) await delay(SEND_GAP_MS);
         }
 
